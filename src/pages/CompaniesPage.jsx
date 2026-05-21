@@ -36,6 +36,7 @@ export default function CompaniesPage({
   selectedSearch = "",
   currentPage = 1,
   totalPages = 1,
+  errorMessage = "",
   onSearchSubmit,
   onCategorySelect,
   onPageChange,
@@ -113,6 +114,12 @@ export default function CompaniesPage({
         </section>
 
         <section className="mb-12 overflow-x-auto">
+          {errorMessage && (
+            <div className="mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-200">
+              {errorMessage}
+            </div>
+          )}
+
           <div className="flex items-center gap-4 pb-2">
             <SmartLink
               href={getCategoryHref?.(null, search)}
@@ -138,7 +145,7 @@ export default function CompaniesPage({
                     : undefined
                 }
                 className={`whitespace-nowrap rounded-xl px-6 py-3 transition-all ${
-                  Number(selectedCategoryId) === category.id
+                  String(selectedCategoryId) === String(category.id)
                     ? "bg-primary font-bold text-slate-900 shadow-lg shadow-primary/20"
                     : "border border-slate-200 bg-white font-semibold text-slate-700 hover:border-primary dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
                 }`}

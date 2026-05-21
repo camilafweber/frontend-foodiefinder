@@ -15,7 +15,6 @@ import DishesPage from "./pages/DishesPage";
 import DishPage from "./pages/DishPage";
 import { api } from "./api";
 import {
-  categoryOptions,
   companies,
   dishes,
   profileImageUrl,
@@ -47,6 +46,98 @@ const filterBySearch = (items, search, fields) => {
         .includes(term),
     ),
   );
+};
+
+const buildApiPath = (path, params = {}) => {
+  const query = new URLSearchParams();
+
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== "") {
+      query.set(key, String(value));
+    }
+  });
+
+  const queryString = query.toString();
+  return queryString ? `${path}?${queryString}` : path;
+};
+
+const normalizePaginatedCompanies = (payload) => {
+  if (Array.isArray(payload)) {
+    return {
+      companies: payload,
+      current_page: 1,
+      total_pages: 1,
+    };
+  }
+
+  return {
+    companies: payload?.companies ?? payload?.items ?? payload?.results ?? [],
+    current_page: payload?.current_page ?? payload?.page ?? 1,
+    total_pages: payload?.total_pages ?? payload?.pages ?? 1,
+  };
+};
+
+const normalizeCategories = (payload) => {
+  const categories = Array.isArray(payload)
+    ? payload
+    : payload?.categories ?? payload?.items ?? payload?.results ?? [];
+
+  return categories.map((category) => ({
+    ...category,
+    id: category.id ?? category.category_id,
+    name: category.name ?? category.label ?? category.category_name,
+  }));
+};
+
+const deriveCategoriesFromCompanies = (companies) => {
+  const categoriesById = new Map();
+
+  companies.forEach((company) => {
+    const categoryId = company.category_id ?? company.categoryId;
+
+    if (categoryId === undefined || categoryId === null) {
+      return;
+    }
+
+    if (!categoriesById.has(String(categoryId))) {
+      categoriesById.set(String(categoryId), {
+        id: categoryId,
+        name:
+          company.category_name ??
+          company.category ??
+          company.category_label ??
+          `Category ${categoryId}`,
+      });
+    }
+  });
+
+  return [...categoriesById.values()];
+};
+
+const categoryMatches = (company, categoryId) =>
+  String(company.category_id ?? company.categoryId) === String(categoryId);
+
+const fetchCompaniesPage = (params = {}) =>
+  api(buildApiPath("/companies", params)).then(normalizePaginatedCompanies);
+
+const fetchAllCompanies = async (params = {}) => {
+  const firstPage = await fetchCompaniesPage({ ...params, page: 1 });
+  const totalPages = Number(firstPage.total_pages) || 1;
+
+  if (totalPages <= 1) {
+    return firstPage.companies;
+  }
+
+  const remainingPages = await Promise.all(
+    Array.from({ length: totalPages - 1 }, (_, index) =>
+      fetchCompaniesPage({ ...params, page: index + 2 }),
+    ),
+  );
+
+  return [
+    ...firstPage.companies,
+    ...remainingPages.flatMap((pageData) => pageData.companies),
+  ];
 };
 
 function useCartState() {
@@ -153,6 +244,7 @@ function CompaniesRoute() {
   const [data, setData] = useState({ companies: [], total_pages: 1 });
   const [loading, setLoading] = useState(true);
   const [categories, setCategories] = useState([]);
+  const [errorMessage, setErrorMessage] = useState("");
 
   const selectedSearch = searchParams.get("search") ?? "";
   const selectedCategoryId = searchParams.get("category_id");
@@ -168,44 +260,117 @@ function CompaniesRoute() {
   };
 
   useEffect(() => {
+    let ignore = false;
     setLoading(true);
-    const url = new URL("/api/companies", window.location.origin);
-    url.searchParams.append("page", page);
-    if (selectedSearch) url.searchParams.append("search", selectedSearch);
-    if (selectedCategoryId)
-      url.searchParams.append("category_id", selectedCategoryId);
+    setErrorMessage("");
 
-    fetch(url)
-      .then((res) => res.json())
-      .then((json) => {
-        setData(json);
+    fetchCompaniesPage({
+      page,
+      search: selectedSearch,
+      category_id: selectedCategoryId,
+    })
+      .then(async (pageData) => {
+        if (ignore) {
+          return;
+        }
+
+        const backendFiltered =
+          !selectedCategoryId ||
+          pageData.companies.every((company) =>
+            categoryMatches(company, selectedCategoryId),
+          );
+
+        if (backendFiltered) {
+          setData(pageData);
+          setLoading(false);
+          return;
+        }
+
+        const allCompanies = await fetchAllCompanies({
+          search: selectedSearch,
+        });
+
+        if (ignore) {
+          return;
+        }
+
+        const filteredCompanies = allCompanies.filter((company) =>
+          categoryMatches(company, selectedCategoryId),
+        );
+        const pageDataFromDatabase = paginate(filteredCompanies, page);
+
+        setData({
+          companies: pageDataFromDatabase.items,
+          current_page: pageDataFromDatabase.current_page,
+          total_pages: pageDataFromDatabase.total_pages,
+        });
         setLoading(false);
       })
       .catch(() => {
-        const filteredCompanies = filterBySearch(
-          selectedCategoryId
-            ? companies.filter(
-                (company) => company.category_id === Number(selectedCategoryId),
-              )
-            : companies,
-          selectedSearch,
-          ["name", "summary", "description"],
-        );
-        const pageData = paginate(filteredCompanies, page);
+        if (ignore) {
+          return;
+        }
 
         setData({
-          companies: pageData.items,
-          current_page: pageData.current_page,
-          total_pages: pageData.total_pages,
+          companies: [],
+          current_page: 1,
+          total_pages: 1,
         });
+        setErrorMessage(
+          "Could not load restaurants from the database. Check that your API is running and that the companies endpoint accepts category_id.",
+        );
         setLoading(false);
       });
+
+    return () => {
+      ignore = true;
+    };
   }, [page, selectedSearch, selectedCategoryId]);
 
   useEffect(() => {
+    let ignore = false;
+
     api("/category")
-      .then((json) => setCategories(json ?? []))
-      .catch(() => setCategories(categoryOptions));
+      .then(async (json) => {
+        if (ignore) {
+          return;
+        }
+
+        const apiCategories = normalizeCategories(json);
+
+        if (apiCategories.length > 0) {
+          setCategories(apiCategories);
+          return;
+        }
+
+        const allCompanies = await fetchAllCompanies();
+
+        if (!ignore) {
+          setCategories(deriveCategoriesFromCompanies(allCompanies));
+        }
+      })
+      .catch(async () => {
+        try {
+          const allCompanies = await fetchAllCompanies();
+
+          if (!ignore) {
+            setCategories(deriveCategoriesFromCompanies(allCompanies));
+          }
+        } catch {
+          if (ignore) {
+            return;
+          }
+
+          setCategories([]);
+          setErrorMessage(
+            "Could not load restaurant filters from the database. Check that your API category endpoint is running.",
+          );
+        }
+      });
+
+    return () => {
+      ignore = true;
+    };
   }, []);
 
   if (loading) return <div>Loading...</div>;
@@ -218,6 +383,7 @@ function CompaniesRoute() {
       selectedSearch={selectedSearch}
       currentPage={data.current_page}
       totalPages={data.total_pages}
+      errorMessage={errorMessage}
       profileImageUrl={profileImageUrl}
       onSearchSubmit={({ search, categoryId }) =>
         navigate(buildCompaniesHref(1, categoryId, search))
